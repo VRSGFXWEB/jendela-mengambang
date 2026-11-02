@@ -9,6 +9,7 @@ import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Build
+import android.os.PowerManager
 import android.os.Bundle
 import android.provider.Settings
 import android.view.Gravity
@@ -25,6 +26,7 @@ class MainActivity : Activity() {
     private lateinit var arrowBtn: TextView
     private lateinit var permOverlay: TextView
     private lateinit var permNotif: TextView
+    private lateinit var permBattery: TextView
     private lateinit var chip: TextView
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
@@ -35,6 +37,7 @@ class MainActivity : Activity() {
         text = t; textSize = sp; setTextColor(c); if (bold) setTypeface(null, Typeface.BOLD)
     }
     private fun hasOverlay() = Settings.canDrawOverlays(this)
+    private fun hasBattery() = getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(packageName)
     private fun hasNotif() = Build.VERSION.SDK_INT < 33 ||
         checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == 0
 
@@ -105,6 +108,9 @@ class MainActivity : Activity() {
         permNotif = permRow(list, "Notifikasi") {
             if (Build.VERSION.SDK_INT >= 33) requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
         }
+        permBattery = permRow(list, "Abaikan optimasi baterai") {
+            startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")))
+        }
         root.addView(list, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(10) })
 
         root.addView(tv("Aktifkan 'Jendela freeform' di Opsi Pengembang supaya aplikasi bisa tampil sebagai jendela kecil.", 12f, DIM),
@@ -120,7 +126,7 @@ class MainActivity : Activity() {
     }
 
     private fun toggle() {
-        if (prefs.getBoolean("active", false)) { stopService(Intent(this, FloatingService::class.java)); refresh(); return }
+        if (FloatingService.running) { stopService(Intent(this, FloatingService::class.java)); arrowBtn.postDelayed({ refresh() }, 300); return }
         if (!hasOverlay()) {
             Toast.makeText(this, "Izinkan 'Tampilkan di atas aplikasi lain' dulu", Toast.LENGTH_LONG).show()
             startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))); return
@@ -131,7 +137,7 @@ class MainActivity : Activity() {
     }
 
     private fun refresh() {
-        val on = prefs.getBoolean("active", false)
+        val on = FloatingService.running
         statusMain.text = if (on) "Sedang aktif" else "Aktifkan"
         arrowBtn.text = if (on) "■" else "→"
         chip.text = if (on) "● ON" else "○ OFF"; chip.setTextColor(if (on) CYAN else DIM)
@@ -139,6 +145,12 @@ class MainActivity : Activity() {
         permOverlay.setTextColor(if (hasOverlay()) CYAN else 0xFFFF7A7A.toInt())
         permNotif.text = if (hasNotif()) "Diizinkan" else "Belum"
         permNotif.setTextColor(if (hasNotif()) CYAN else 0xFFFF7A7A.toInt())
+        refreshBattery()
+    }
+
+    private fun refreshBattery() {
+        permBattery.text = if (hasBattery()) "Diizinkan" else "Belum"
+        permBattery.setTextColor(if (hasBattery()) CYAN else 0xFFFF7A7A.toInt())
     }
 
     override fun onResume() { super.onResume(); refresh() }
