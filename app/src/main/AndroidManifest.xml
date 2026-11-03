@@ -11,8 +11,9 @@
             <category android:name="android.intent.category.LAUNCHER"/>
         </intent>
     </queries>
-    <application android:label="Jendela Mengambang"
-        android:theme="@android:style/Theme.Material.NoActionBar">
+    <application android:label="FloatWin"
+        android:icon="@mipmap/ic_launcher"
+        android:theme="@style/AppTheme">
         <activity android:name=".MainActivity" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN"/>
