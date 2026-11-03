@@ -21,9 +21,11 @@ jobs:
         with:
           name: FloatWin-debug
           path: app/build/outputs/apk/debug/app-debug.apk
-      - name: Buat Release
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Simpan APK ke repo
         run: |
           cp app/build/outputs/apk/debug/app-debug.apk FloatWin.apk
-          gh release create "v${{ github.run_number }}" FloatWin.apk --title "FloatWin build ${{ github.run_number }}" --notes "APK debug"
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add -f FloatWin.apk
+          git commit -m "Update FloatWin.apk [skip ci]" || echo "tidak ada perubahan"
+          git push
