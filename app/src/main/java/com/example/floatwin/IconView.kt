@@ -54,8 +54,43 @@ fun View.press() {
     setOnTouchListener { v, e ->
         when (e.action) {
             MotionEvent.ACTION_DOWN -> v.animate().scaleX(0.96f).scaleY(0.96f).setDuration(80).start()
-            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> v.animate().scaleX(1f).scaleY(1f).setDuration(140).start()
+            MotionEvent.ACTION_UP -> { v.animate().scaleX(1f).scaleY(1f).setDuration(140).start(); Sfx.pop() }
+            MotionEvent.ACTION_CANCEL -> v.animate().scaleX(1f).scaleY(1f).setDuration(140).start()
         }
         false
+    }
+}
+
+/** Saklar gambar sendiri dengan animasi geser halus. */
+class SwitchView(ctx: Context, on: Boolean = false, private val onChange: (Boolean) -> Unit = {}) : View(ctx) {
+    private val track = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val knob = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE }
+    private var pos = if (on) 1f else 0f
+    var checked = on
+        private set
+
+    init {
+        setOnClickListener { set(!checked, true) }
+        press()
+    }
+
+    fun set(v: Boolean, notify: Boolean) {
+        if (v == checked && !notify) return
+        checked = v
+        android.animation.ValueAnimator.ofFloat(pos, if (v) 1f else 0f).apply {
+            duration = 180
+            addUpdateListener { pos = it.animatedValue as Float; invalidate() }
+        }.start()
+        if (notify) onChange(v)
+    }
+
+    override fun onDraw(c: Canvas) {
+        val w = width.toFloat(); val h = height.toFloat()
+        val off = 0xFF2A3547.toInt(); val onC = 0xFF3D8BFF.toInt()
+        track.color = android.animation.ArgbEvaluator().evaluate(pos, off, onC) as Int
+        c.drawRoundRect(RectF(0f, 0f, w, h), h / 2, h / 2, track)
+        val r = h / 2 - h * 0.14f
+        val cx = h / 2 + (w - h) * pos
+        c.drawCircle(cx, h / 2, r, knob)
     }
 }

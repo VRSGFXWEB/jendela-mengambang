@@ -68,6 +68,7 @@ class MainActivity : Activity() {
 
     override fun onCreate(b: Bundle?) {
         super.onCreate(b)
+        Sfx.init(this)
         window.statusBarColor = BG; window.navigationBarColor = BG
         val dm = resources.displayMetrics
         val scroll = ScrollView(this).apply { setBackgroundColor(BG); isFillViewport = true; overScrollMode = View.OVER_SCROLL_NEVER }
@@ -111,7 +112,10 @@ class MainActivity : Activity() {
         root.addView(section("A P L I K A S I   D I   T O M B O L"))
         val pickRow = LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL; setPadding(dp(18), dp(18), dp(18), dp(18)); background = box(CARD, 20)
-            setOnClickListener { startActivity(Intent(this@MainActivity, AppSelectActivity::class.java)) }; press()
+            setOnClickListener {
+                startActivity(Intent(this@MainActivity, AppSelectActivity::class.java))
+                overridePendingTransition(R.anim.slide_in_right, R.anim.slide_out_left)
+            }; press()
         }
         val pickCol = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         pickCol.addView(tv("Pilih aplikasi", 15f, bold = true))
@@ -148,6 +152,17 @@ class MainActivity : Activity() {
         right.addView(tv("Berlaku untuk aplikasi yang dibuka berikutnya", 12f, DIM))
         sizeCard.addView(right, LinearLayout.LayoutParams(0, -2, 1f))
         root.addView(sizeCard, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(10) })
+
+        // Pengaturan
+        root.addView(section("P E N G A T U R A N"))
+        val setCard = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; background = box(CARD, 20) }
+        setRow(setCard, "Suara klik", "Efek pop saat menyentuh", prefs.getBoolean("sound", true)) { on ->
+            prefs.edit().putBoolean("sound", on).apply(); Sfx.enabled = on
+        }
+        setRow(setCard, "Tampilkan FPS", "Pengukur frame tampilan sistem, bukan FPS asli game", prefs.getBoolean("fps", false)) { on ->
+            prefs.edit().putBoolean("fps", on).apply()
+        }
+        root.addView(setCard, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(10) })
 
         // Cara pakai
         root.addView(section("C A R A   P A K A I"))
@@ -199,11 +214,24 @@ class MainActivity : Activity() {
         parent.addView(r); return pill
     }
 
+    private fun setRow(parent: LinearLayout, title: String, sub: String, on: Boolean, change: (Boolean) -> Unit) {
+        if (parent.childCount > 0) parent.addView(View(this).apply { setBackgroundColor(0x14FFFFFF) }, LinearLayout.LayoutParams(-1, dp(1)))
+        val r = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(dp(18), dp(14), dp(18), dp(14)) }
+        val c = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        c.addView(tv(title, 14.5f, bold = true))
+        c.addView(tv(sub, 12f, DIM).apply { setPadding(0, dp(3), 0, 0) })
+        r.addView(c, LinearLayout.LayoutParams(0, -2, 1f))
+        r.addView(SwitchView(this, on, change), LinearLayout.LayoutParams(dp(48), dp(28)).apply { marginStart = dp(12) })
+        parent.addView(r)
+    }
+
     private fun setPill(t: TextView, ok: Boolean) {
         t.text = if (ok) "Diizinkan" else "Belum"
         t.setTextColor(if (ok) ACCENT_L else RED)
         t.background = box(if (ok) 0x223D8BFF else 0x22FF6B6B, 12, 0)
     }
+
+    private val CHANNEL = "https://whatsapp.com/channel/0029Vb7AtEHL2AU0IXm9642x"
 
     private fun toggle() {
         if (FloatingService.running) {
@@ -215,6 +243,16 @@ class MainActivity : Activity() {
             Toast.makeText(this, "Izinkan 'Tampilkan di atas aplikasi lain' dulu", Toast.LENGTH_LONG).show()
             startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))); return
         }
+        // Aktivasi pertama kali: buka saluran WhatsApp sekali saja, lalu aktif otomatis saat kembali
+        if (!prefs.getBoolean("ch_done", false)) {
+            prefs.edit().putBoolean("ch_done", true).putBoolean("pending", true).apply()
+            try { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(CHANNEL))); return }
+            catch (e: Exception) { prefs.edit().putBoolean("pending", false).apply() }
+        }
+        startNow()
+    }
+
+    private fun startNow() {
         if (!hasNotif()) requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
         prefs.edit().putBoolean("wanted", true).apply()
         startForegroundService(Intent(this, FloatingService::class.java))
@@ -238,6 +276,12 @@ class MainActivity : Activity() {
         setPill(permOverlay, hasOverlay()); setPill(permNotif, hasNotif()); setPill(permBattery, hasBattery())
     }
 
-    override fun onResume() { super.onResume(); refresh() }
+    override fun onResume() {
+        super.onResume()
+        if (prefs.getBoolean("pending", false) && hasOverlay()) {
+            prefs.edit().putBoolean("pending", false).apply(); startNow()
+        }
+        refresh()
+    }
     override fun onRequestPermissionsResult(c: Int, p: Array<out String>, r: IntArray) { super.onRequestPermissionsResult(c, p, r); refresh() }
 }

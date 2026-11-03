@@ -43,8 +43,11 @@ class AppSelectActivity : Activity() {
         adapter.notifyDataSetChanged()
     }
 
+    override fun finish() { super.finish(); overridePendingTransition(R.anim.slide_in_left, R.anim.slide_out_right) }
+
     override fun onCreate(b: Bundle?) {
         super.onCreate(b)
+        Sfx.init(this)
         window.statusBarColor = BG; window.navigationBarColor = BG
         pinned.addAll(prefs.getStringSet("pinned", emptySet()) ?: emptySet())
         val pm = packageManager
@@ -94,6 +97,7 @@ class AppSelectActivity : Activity() {
             selector = ColorDrawable(Color.TRANSPARENT); overScrollMode = View.OVER_SCROLL_NEVER
             setOnItemClickListener { _, v, i, _ ->
                 val pkg = shown[i].first.activityInfo.packageName
+                Sfx.pop()
                 if (!pinned.remove(pkg)) pinned.add(pkg)
                 prefs.edit().putStringSet("pinned", HashSet(pinned)).apply()
                 updateCount(); this@AppSelectActivity.adapter.notifyDataSetChanged()

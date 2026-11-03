@@ -2,9 +2,7 @@ package com.example.floatwin
 
 import android.animation.ValueAnimator
 import android.app.*
-import android.os.SystemClock
 import android.content.Intent
-import android.content.pm.ResolveInfo
 import android.content.res.Configuration
 import android.graphics.*
 import android.graphics.drawable.ColorDrawable
@@ -12,9 +10,11 @@ import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.Icon
 import android.hardware.display.DisplayManager
+import android.content.SharedPreferences
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.SystemClock
 import android.text.Editable
 import android.text.TextWatcher
 import android.view.*
@@ -24,21 +24,55 @@ import android.widget.*
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.abs
 import kotlin.math.hypot
+import kotlin.math.roundToInt
 
 class FloatingService : Service() {
     companion object { @Volatile var running = false }
+
+    private data class AppItem(val pkg: String, val label: String)
 
     private lateinit var wm: WindowManager
     private var bubble: View? = null
     private var bubbleLp: WindowManager.LayoutParams? = null
     private var trash: FrameLayout? = null
     private var picker: View? = null
-    @Volatile private var cached: List<Pair<ResolveInfo, String>>? = null
+    private var fpsView: TextView? = null
+    private var fpsLp: WindowManager.LayoutParams? = null
+    private var fpsOn = false
+    @Volatile private var cached: List<AppItem>? = null
     private val icons = ConcurrentHashMap<String, Drawable>()
     private val ui = Handler(Looper.getMainLooper())
     private val scr = Point()
     private val density get() = resources.displayMetrics.density
     private val prefs get() = getSharedPreferences("p", MODE_PRIVATE)
+
+    // ---- pantau rotasi layar lewat DisplayManager (tetap jalan walau game di depan) ----
+    private val displayListener = object : DisplayManager.DisplayListener {
+        override fun onDisplayChanged(id: Int) { if (id == 0) ui.post { onScreenChanged() } }
+        override fun onDisplayAdded(id: Int) {}
+        override fun onDisplayRemoved(id: Int) {}
+    }
+    private val prefListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+        if (key == "fps") ui.post { setFps(prefs.getBoolean("fps", false)) }
+        if (key == "sound") Sfx.enabled = prefs.getBoolean("sound", true)
+    }
+
+    // ---- penghitung frame (FPS tampilan sistem) ----
+    private var frames = 0
+    private var lastNs = 0L
+    private val frameCb = object : Choreographer.FrameCallback {
+        override fun doFrame(ns: Long) {
+            if (!fpsOn) return
+            if (lastNs == 0L) lastNs = ns
+            frames++
+            val d = ns - lastNs
+            if (d >= 1_000_000_000L) {
+                fpsView?.text = "FPS " + (frames * 1e9 / d).roundToInt()
+                frames = 0; lastNs = ns
+            }
+            Choreographer.getInstance().postFrameCallback(this)
+        }
+    }
 
     override fun onBind(i: Intent?): IBinder? = null
 
@@ -50,6 +84,7 @@ class FloatingService : Service() {
     override fun onCreate() {
         super.onCreate()
         wm = getSystemService(WINDOW_SERVICE) as WindowManager
+        Sfx.init(this)
         val prev = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { t, e ->
             try {
@@ -75,11 +110,16 @@ class FloatingService : Service() {
         running = true
         prefs.edit().putBoolean("active", true).apply()
         refreshScreen()
+        getSystemService(DisplayManager::class.java).registerDisplayListener(displayListener, ui)
+        prefs.registerOnSharedPreferenceChangeListener(prefListener)
+        try { showBubble() } catch (e: Exception) { stopSelf(); return }
+        setFps(prefs.getBoolean("fps", false))
+        // Muat daftar aplikasi pelan-pelan di belakang layar supaya tidak membebani game
         Thread {
-            val l = loadApps(); cached = l
-            for ((ri, _) in l) icons.getOrPut(ri.activityInfo.packageName) { ri.loadIcon(packageManager) }
+            Thread.currentThread().priority = Thread.MIN_PRIORITY
+            try { Thread.sleep(1500) } catch (_: Throwable) {}
+            cached = buildItems()
         }.start()
-        try { showBubble() } catch (e: Exception) { stopSelf() }
     }
 
     private fun scheduleRestart() {
@@ -89,12 +129,21 @@ class FloatingService : Service() {
             .setAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, SystemClock.elapsedRealtime() + 2000, pi)
     }
 
-    private fun loadApps(): List<Pair<ResolveInfo, String>> {
+    // Kalau ada aplikasi yang dipilih, cukup ambil itu saja (cepat dan ringan)
+    private fun buildItems(): List<AppItem> {
         val pm = packageManager
+        val pinned = prefs.getStringSet("pinned", emptySet()) ?: emptySet()
+        if (pinned.isNotEmpty()) {
+            val l = pinned.mapNotNull {
+                try { AppItem(it, pm.getApplicationLabel(pm.getApplicationInfo(it, 0)).toString()) } catch (_: Throwable) { null }
+            }.sortedBy { it.label.lowercase() }
+            if (l.isNotEmpty()) return l
+        }
         return pm.queryIntentActivities(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER), 0)
             .filter { it.activityInfo.packageName != packageName }
-            .map { it to it.loadLabel(pm).toString() }
-            .sortedBy { it.second.lowercase() }
+            .map { AppItem(it.activityInfo.packageName, it.loadLabel(pm).toString()) }
+            .distinctBy { it.pkg }
+            .sortedBy { it.label.lowercase() }
     }
 
     @Suppress("DEPRECATION")
@@ -121,11 +170,12 @@ class FloatingService : Service() {
         var sx = 0f; var sy = 0f; var ox = 0; var oy = 0
         var moved = false; var longFired = false
         val longPress = Runnable {
-            if (!moved) { longFired = true; v.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS); restoreLast() }
+            if (!moved) { longFired = true; v.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS); Sfx.pop(); restoreLast() }
         }
         v.setOnTouchListener { _, e ->
             when (e.action) {
                 MotionEvent.ACTION_DOWN -> {
+                    refreshScreen() // ukuran layar selalu diambil ulang (aman saat layar miring)
                     sx = e.rawX; sy = e.rawY; ox = p.x; oy = p.y; moved = false; longFired = false
                     v.animate().scaleX(0.9f).scaleY(0.9f).setDuration(90).start()
                     ui.postDelayed(longPress, 450)
@@ -145,8 +195,8 @@ class FloatingService : Service() {
                     v.animate().scaleX(1f).scaleY(1f).setDuration(120).start()
                     if (moved) {
                         val over = overTrash(p); hideTrash()
-                        if (over) { prefs.edit().putBoolean("wanted", false).apply(); stopSelf() } else snap(v, p, size)
-                    } else if (!longFired) showPicker()
+                        if (over) { Sfx.pop(); prefs.edit().putBoolean("wanted", false).apply(); stopSelf() } else snap(v, p, size)
+                    } else if (!longFired) { Sfx.pop(); showPicker() }
                 }
                 MotionEvent.ACTION_CANCEL -> {
                     ui.removeCallbacks(longPress)
@@ -160,7 +210,6 @@ class FloatingService : Service() {
         v.animate().scaleX(1f).scaleY(1f).setDuration(300).setInterpolator(OvershootInterpolator()).start()
     }
 
-    // Tempel ke tepi layar dengan animasi halus
     private fun snap(v: View, p: WindowManager.LayoutParams, size: Int) {
         val m = (4 * density).toInt()
         val target = if (p.x + size / 2 < scr.x / 2) m else (scr.x - size - m).coerceAtLeast(0)
@@ -178,6 +227,44 @@ class FloatingService : Service() {
         val last = prefs.getString("last", null)
         if (last == null) Toast.makeText(this, "Belum ada aplikasi yang dibuka", Toast.LENGTH_SHORT).show()
         else launch(last)
+    }
+
+    // ---------- Penghitung FPS ----------
+    private fun setFps(on: Boolean) {
+        if (on == fpsOn && (fpsView != null) == on) return
+        fpsOn = on
+        if (on) {
+            val v = TextView(this).apply {
+                text = "FPS --"; textSize = 12f; setTextColor(Color.WHITE); setTypeface(null, Typeface.BOLD)
+                setPadding((10 * density).toInt(), (5 * density).toInt(), (10 * density).toInt(), (5 * density).toInt())
+                background = GradientDrawable().apply { setColor(0xAA05080D.toInt()); cornerRadius = 40f; setStroke((1 * density).toInt(), 0x663D8BFF) }
+            }
+            val p = lp(-2, -2).apply {
+                x = prefs.getInt("fx", (12 * density).toInt()).coerceIn(0, scr.x.coerceAtLeast(1))
+                y = prefs.getInt("fy", (40 * density).toInt()).coerceIn(0, scr.y.coerceAtLeast(1))
+            }
+            var sx = 0f; var sy = 0f; var ox = 0; var oy = 0
+            v.setOnTouchListener { _, e ->
+                when (e.action) {
+                    MotionEvent.ACTION_DOWN -> { sx = e.rawX; sy = e.rawY; ox = p.x; oy = p.y }
+                    MotionEvent.ACTION_MOVE -> {
+                        p.x = (ox + (e.rawX - sx).toInt()).coerceIn(0, (scr.x - v.width).coerceAtLeast(0))
+                        p.y = (oy + (e.rawY - sy).toInt()).coerceIn(0, (scr.y - v.height).coerceAtLeast(0))
+                        wm.updateViewLayout(v, p)
+                    }
+                    MotionEvent.ACTION_UP -> prefs.edit().putInt("fx", p.x).putInt("fy", p.y).apply()
+                }
+                true
+            }
+            try { wm.addView(v, p) } catch (_: Throwable) { fpsOn = false; return }
+            fpsView = v; fpsLp = p
+            frames = 0; lastNs = 0L
+            Choreographer.getInstance().postFrameCallback(frameCb)
+        } else {
+            Choreographer.getInstance().removeFrameCallback(frameCb)
+            fpsView?.let { try { wm.removeView(it) } catch (_: Throwable) {} }
+            fpsView = null; fpsLp = null
+        }
     }
 
     // ---------- Ikon sampah ----------
@@ -216,12 +303,10 @@ class FloatingService : Service() {
     // ---------- Pilih aplikasi ----------
     private fun showPicker() {
         if (picker != null) return
+        refreshScreen()
         val pm = packageManager
-        val items = cached ?: loadApps().also { cached = it }
-        val pinned = prefs.getStringSet("pinned", emptySet()) ?: emptySet()
-        val base = if (pinned.isEmpty()) items
-            else items.filter { it.first.activityInfo.packageName in pinned }.ifEmpty { items }
-        val shown = base.toMutableList()
+        val items = cached ?: buildItems().also { cached = it }
+        val shown = items.toMutableList()
         val d = density
         fun dp(v: Int) = (v * d).toInt()
         val last = prefs.getString("last", null)
@@ -246,7 +331,7 @@ class FloatingService : Service() {
                 text = "Tampilkan lagi: $lbl"; setTextColor(0xFF8FB8FF.toInt()); textSize = 14f
                 setPadding(dp(18), dp(12), dp(18), dp(12))
                 background = GradientDrawable().apply { setColor(0x223D8BFF); cornerRadius = dp(18).toFloat() }
-                setOnClickListener { launch(last); closePicker() }
+                setOnClickListener { Sfx.pop(); launch(last); closePicker() }
             }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
         }
 
@@ -260,30 +345,40 @@ class FloatingService : Service() {
                     addView(ImageView(this@FloatingService), LinearLayout.LayoutParams(dp(40), dp(40)))
                     addView(TextView(this@FloatingService).apply { setTextColor(Color.WHITE); textSize = 16f; setPadding(dp(14), 0, 0, 0) })
                 }
-                val (ri, label) = shown[i]
-                (row.getChildAt(0) as ImageView).setImageDrawable(icons.getOrPut(ri.activityInfo.packageName) { ri.loadIcon(pm) })
-                (row.getChildAt(1) as TextView).text = label
+                val app = shown[i]
+                val ic = icons[app.pkg] ?: try { pm.getApplicationIcon(app.pkg).also { d2 -> icons[app.pkg] = d2 } } catch (_: Throwable) { null }
+                (row.getChildAt(0) as ImageView).setImageDrawable(ic)
+                (row.getChildAt(1) as TextView).text = app.label
                 return row
             }
         }
         val list = ListView(this).apply {
             this.adapter = adapter; divider = null; dividerHeight = 0
-            selector = ColorDrawable(Color.TRANSPARENT)
-            setOnItemClickListener { _, _, i, _ -> launch(shown[i].first.activityInfo.packageName); closePicker() }
+            selector = ColorDrawable(Color.TRANSPARENT); overScrollMode = View.OVER_SCROLL_NEVER
+            setOnItemClickListener { _, _, i, _ -> Sfx.pop(); launch(shown[i].pkg); closePicker() }
         }
         panel.addView(list, LinearLayout.LayoutParams(-1, 0, 1f).apply { topMargin = dp(8) })
+
+        // Baris saklar FPS
+        val fpsRow = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(dp(10), dp(10), dp(6), dp(2)) }
+        fpsRow.addView(TextView(this).apply { text = "Tampilkan FPS"; setTextColor(Color.WHITE); textSize = 14f },
+            LinearLayout.LayoutParams(0, -2, 1f))
+        fpsRow.addView(SwitchView(this, prefs.getBoolean("fps", false)) { on ->
+            prefs.edit().putBoolean("fps", on).apply()
+        }, LinearLayout.LayoutParams(dp(46), dp(26)))
+        panel.addView(fpsRow, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
 
         search.addTextChangedListener(object : TextWatcher {
             override fun afterTextChanged(s: Editable?) {
                 val q = s.toString().trim().lowercase()
-                shown.clear(); shown.addAll(base.filter { it.second.lowercase().contains(q) })
+                shown.clear(); shown.addAll(items.filter { it.label.lowercase().contains(q) })
                 adapter.notifyDataSetChanged()
             }
             override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
             override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
         })
 
-        val w = minOf(dp(320), scr.x - dp(24)); val h = minOf(dp(500), scr.y - dp(24))
+        val w = minOf(dp(320), scr.x - dp(24)); val h = minOf(dp(520), scr.y - dp(24))
         root.addView(panel, FrameLayout.LayoutParams(w, h, Gravity.CENTER))
         root.alpha = 0f; panel.scaleX = 0.92f; panel.scaleY = 0.92f
         wm.addView(root, lp(-1, -1, true).apply { softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_PAN })
@@ -300,6 +395,7 @@ class FloatingService : Service() {
     private fun closePickerNow() { picker?.let { try { wm.removeView(it) } catch (_: Throwable) {} }; picker = null }
 
     private fun launch(pkg: String) {
+        refreshScreen()
         val pct = prefs.getInt("size", 60).coerceAtLeast(30)
         val w = scr.x * pct / 100; val h = scr.y * pct / 100
         val l = (scr.x - w) / 2; val t = (scr.y - h) / 2
@@ -313,25 +409,32 @@ class FloatingService : Service() {
         startActivity(i, opts.toBundle())
     }
 
-    // Layar diputar (mis. main game): tombol dikembalikan ke dalam layar
-    override fun onConfigurationChanged(c: Configuration) {
-        super.onConfigurationChanged(c)
+    // Layar berputar (mis. main game): ukuran layar diambil ulang, tombol dikembalikan ke dalam layar
+    private fun onScreenChanged() {
         refreshScreen(); closePickerNow(); hideTrash()
-        ui.postDelayed({
-            refreshScreen()
-            val p = bubbleLp ?: return@postDelayed; val v = bubble ?: return@postDelayed
-            val size = bubbleSize()
+        val size = bubbleSize()
+        bubbleLp?.let { p ->
             p.x = p.x.coerceIn(0, (scr.x - size).coerceAtLeast(0))
             p.y = p.y.coerceIn(0, (scr.y - size).coerceAtLeast(0))
-            try { wm.updateViewLayout(v, p) } catch (_: Throwable) {}
-        }, 400)
+            bubble?.let { try { wm.updateViewLayout(it, p) } catch (_: Throwable) {} }
+        }
+        fpsLp?.let { p ->
+            p.x = p.x.coerceIn(0, scr.x.coerceAtLeast(1)); p.y = p.y.coerceIn(0, scr.y.coerceAtLeast(1))
+            fpsView?.let { try { wm.updateViewLayout(it, p) } catch (_: Throwable) {} }
+        }
     }
+
+    override fun onConfigurationChanged(c: Configuration) { super.onConfigurationChanged(c); onScreenChanged() }
 
     override fun onDestroy() {
         running = false
         prefs.edit().putBoolean("active", false).apply()
+        try { getSystemService(DisplayManager::class.java).unregisterDisplayListener(displayListener) } catch (_: Throwable) {}
+        try { prefs.unregisterOnSharedPreferenceChangeListener(prefListener) } catch (_: Throwable) {}
+        Choreographer.getInstance().removeFrameCallback(frameCb)
         ui.removeCallbacksAndMessages(null)
         hideTrash(); closePickerNow()
+        fpsView?.let { try { wm.removeView(it) } catch (_: Throwable) {} }; fpsView = null
         bubble?.let { try { wm.removeView(it) } catch (_: Throwable) {} }; bubble = null
         super.onDestroy()
     }
