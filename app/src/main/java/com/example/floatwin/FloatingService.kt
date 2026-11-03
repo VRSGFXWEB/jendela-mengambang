@@ -2,6 +2,7 @@ package com.example.floatwin
 
 import android.animation.ValueAnimator
 import android.app.*
+import android.os.SystemClock
 import android.content.Intent
 import android.content.pm.ResolveInfo
 import android.content.res.Configuration
@@ -30,7 +31,7 @@ class FloatingService : Service() {
     private lateinit var wm: WindowManager
     private var bubble: View? = null
     private var bubbleLp: WindowManager.LayoutParams? = null
-    private var trash: TextView? = null
+    private var trash: FrameLayout? = null
     private var picker: View? = null
     @Volatile private var cached: List<Pair<ResolveInfo, String>>? = null
     private val icons = ConcurrentHashMap<String, Drawable>()
@@ -42,13 +43,24 @@ class FloatingService : Service() {
     override fun onBind(i: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == "STOP") { stopSelf(); return START_NOT_STICKY }
+        if (intent?.action == "STOP") { prefs.edit().putBoolean("wanted", false).apply(); stopSelf(); return START_NOT_STICKY }
         return START_STICKY
     }
 
     override fun onCreate() {
         super.onCreate()
         wm = getSystemService(WINDOW_SERVICE) as WindowManager
+        val prev = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { t, e ->
+            try {
+                val now = System.currentTimeMillis()
+                if (prefs.getBoolean("wanted", false) && now - prefs.getLong("crash", 0L) > 15000) {
+                    prefs.edit().putLong("crash", now).commit()
+                    scheduleRestart()
+                }
+            } catch (_: Throwable) {}
+            prev?.uncaughtException(t, e)
+        }
         getSystemService(NotificationManager::class.java)
             .createNotificationChannel(NotificationChannel("fw", "FloatWin", NotificationManager.IMPORTANCE_LOW))
         val stopPi = PendingIntent.getService(this, 0,
@@ -67,7 +79,14 @@ class FloatingService : Service() {
             val l = loadApps(); cached = l
             for ((ri, _) in l) icons.getOrPut(ri.activityInfo.packageName) { ri.loadIcon(packageManager) }
         }.start()
-        showBubble()
+        try { showBubble() } catch (e: Exception) { stopSelf() }
+    }
+
+    private fun scheduleRestart() {
+        val pi = PendingIntent.getForegroundService(this, 7, Intent(this, FloatingService::class.java),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+        getSystemService(AlarmManager::class.java)
+            .setAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, SystemClock.elapsedRealtime() + 2000, pi)
     }
 
     private fun loadApps(): List<Pair<ResolveInfo, String>> {
@@ -126,7 +145,7 @@ class FloatingService : Service() {
                     v.animate().scaleX(1f).scaleY(1f).setDuration(120).start()
                     if (moved) {
                         val over = overTrash(p); hideTrash()
-                        if (over) stopSelf() else snap(v, p, size)
+                        if (over) { prefs.edit().putBoolean("wanted", false).apply(); stopSelf() } else snap(v, p, size)
                     } else if (!longFired) showPicker()
                 }
                 MotionEvent.ACTION_CANCEL -> {
@@ -171,11 +190,11 @@ class FloatingService : Service() {
 
     private fun showTrash() {
         if (trash != null) return
-        val size = (64 * density).toInt(); val c = trashCenter()
-        val v = TextView(this).apply {
-            text = "🗑"; textSize = 26f; gravity = Gravity.CENTER
+        val size = (64 * density).toInt(); val c = trashCenter(); val ic = (28 * density).toInt()
+        val v = FrameLayout(this).apply {
             background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(0xCC222B36.toInt()); setStroke((1 * density).toInt(), 0x55FFFFFF) }
             alpha = 0f
+            addView(IconView(this@FloatingService, IconView.TRASH), FrameLayout.LayoutParams(ic, ic, Gravity.CENTER))
         }
         val p = lp(size, size).apply {
             flags = flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
@@ -199,7 +218,10 @@ class FloatingService : Service() {
         if (picker != null) return
         val pm = packageManager
         val items = cached ?: loadApps().also { cached = it }
-        val shown = items.toMutableList()
+        val pinned = prefs.getStringSet("pinned", emptySet()) ?: emptySet()
+        val base = if (pinned.isEmpty()) items
+            else items.filter { it.first.activityInfo.packageName in pinned }.ifEmpty { items }
+        val shown = base.toMutableList()
         val d = density
         fun dp(v: Int) = (v * d).toInt()
         val last = prefs.getString("last", null)
@@ -221,7 +243,7 @@ class FloatingService : Service() {
         if (last != null) {
             val lbl = try { pm.getApplicationLabel(pm.getApplicationInfo(last, 0)).toString() } catch (_: Throwable) { null }
             if (lbl != null) panel.addView(TextView(this).apply {
-                text = "↺  Tampilkan lagi: $lbl"; setTextColor(0xFF8FB8FF.toInt()); textSize = 14f
+                text = "Tampilkan lagi: $lbl"; setTextColor(0xFF8FB8FF.toInt()); textSize = 14f
                 setPadding(dp(18), dp(12), dp(18), dp(12))
                 background = GradientDrawable().apply { setColor(0x223D8BFF); cornerRadius = dp(18).toFloat() }
                 setOnClickListener { launch(last); closePicker() }
@@ -254,7 +276,7 @@ class FloatingService : Service() {
         search.addTextChangedListener(object : TextWatcher {
             override fun afterTextChanged(s: Editable?) {
                 val q = s.toString().trim().lowercase()
-                shown.clear(); shown.addAll(items.filter { it.second.lowercase().contains(q) })
+                shown.clear(); shown.addAll(base.filter { it.second.lowercase().contains(q) })
                 adapter.notifyDataSetChanged()
             }
             override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}

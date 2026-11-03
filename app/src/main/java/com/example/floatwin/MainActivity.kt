@@ -1,6 +1,8 @@
 package com.example.floatwin
 
 import android.Manifest
+import android.animation.ArgbEvaluator
+import android.animation.ValueAnimator
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
@@ -14,7 +16,6 @@ import android.os.PowerManager
 import android.provider.Settings
 import android.view.*
 import android.view.animation.DecelerateInterpolator
-import android.view.animation.OvershootInterpolator
 import android.widget.*
 
 class MainActivity : Activity() {
@@ -24,13 +25,17 @@ class MainActivity : Activity() {
     private val ACCENT_L = 0xFF8FB8FF.toInt()
     private val DIM = 0xFF8A97A6.toInt()
     private val RED = 0xFFFF6B6B.toInt()
+    private val ON_COLOR = 0xFFFF3B3B.toInt()   // merah = aktif
+    private val OFF_COLOR = 0xFF2ECC71.toInt()  // hijau = nonaktif
     private val prefs by lazy { getSharedPreferences("p", MODE_PRIVATE) }
     private lateinit var statusMain: TextView
-    private lateinit var arrowBtn: TextView
+    private lateinit var toggleBtn: View
+    private lateinit var pinnedSub: TextView
     private lateinit var permOverlay: TextView
     private lateinit var permNotif: TextView
     private lateinit var permBattery: TextView
     private var lastOn: Boolean? = null
+    private var btnColor = OFF_COLOR
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
     private fun box(color: Int, r: Int, stroke: Int = 0x22FFFFFF) = GradientDrawable().apply {
@@ -38,15 +43,6 @@ class MainActivity : Activity() {
     }
     private fun tv(t: String, sp: Float, c: Int = Color.WHITE, bold: Boolean = false) = TextView(this).apply {
         text = t; textSize = sp; setTextColor(c); if (bold) setTypeface(null, Typeface.BOLD)
-    }
-    private fun View.press() {
-        setOnTouchListener { v, e ->
-            when (e.action) {
-                MotionEvent.ACTION_DOWN -> v.animate().scaleX(0.96f).scaleY(0.96f).setDuration(80).start()
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> v.animate().scaleX(1f).scaleY(1f).setDuration(120).start()
-            }
-            false
-        }
     }
     private fun hasOverlay() = Settings.canDrawOverlays(this)
     private fun hasBattery() = getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(packageName)
@@ -89,7 +85,7 @@ class MainActivity : Activity() {
         }
         root.addView(banner, LinearLayout.LayoutParams(bw, bw * 405 / 1080))
 
-        // Kartu utama
+        // Kartu utama: tombol polos, merah = aktif, hijau = nonaktif
         val card = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL; setPadding(dp(18), dp(18), dp(18), dp(18))
             background = GradientDrawable(GradientDrawable.Orientation.TL_BR, intArrayOf(0xFF123A78.toInt(), 0xFF0A1424.toInt())).apply {
@@ -98,14 +94,32 @@ class MainActivity : Activity() {
         }
         val row = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
         row.addView(ImageView(this).apply { setImageResource(R.mipmap.ic_launcher) }, LinearLayout.LayoutParams(dp(56), dp(56)))
-        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(14), 0, 0, 0) }
-        statusMain = tv("", 13f, ACCENT_L)
-        col.addView(statusMain); col.addView(tv("Jendela Mengambang", 19f, bold = true))
+        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(14), 0, dp(8), 0) }
+        col.addView(tv("Jendela Mengambang", 19f, bold = true))
+        statusMain = tv("", 12.5f, ACCENT_L).apply { setPadding(0, dp(4), 0, 0) }
+        col.addView(statusMain)
         row.addView(col, LinearLayout.LayoutParams(0, -2, 1f))
-        arrowBtn = tv("→", 24f, Color.BLACK, true).apply { gravity = Gravity.CENTER; setOnClickListener { toggle() }; press() }
-        row.addView(arrowBtn, LinearLayout.LayoutParams(dp(56), dp(56)))
+        toggleBtn = View(this).apply {
+            background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(btnColor) }
+            setOnClickListener { toggle() }; press()
+        }
+        row.addView(toggleBtn, LinearLayout.LayoutParams(dp(54), dp(54)))
         card.addView(row)
         root.addView(card, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(18) })
+
+        // Pilih aplikasi untuk tombol bulat
+        root.addView(section("A P L I K A S I   D I   T O M B O L"))
+        val pickRow = LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL; setPadding(dp(18), dp(18), dp(18), dp(18)); background = box(CARD, 20)
+            setOnClickListener { startActivity(Intent(this@MainActivity, AppSelectActivity::class.java)) }; press()
+        }
+        val pickCol = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        pickCol.addView(tv("Pilih aplikasi", 15f, bold = true))
+        pinnedSub = tv("", 12.5f, DIM).apply { setPadding(0, dp(3), 0, 0) }
+        pickCol.addView(pinnedSub)
+        pickRow.addView(pickCol, LinearLayout.LayoutParams(0, -2, 1f))
+        pickRow.addView(IconView(this, IconView.CHEVRON, DIM), LinearLayout.LayoutParams(dp(18), dp(18)))
+        root.addView(pickRow, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(10) })
 
         // Ukuran jendela
         root.addView(section("U K U R A N   J E N D E L A"))
@@ -137,7 +151,7 @@ class MainActivity : Activity() {
 
         // Cara pakai
         root.addView(section("C A R A   P A K A I"))
-        val how = tv("●  Tap tombol bulat, lalu pilih aplikasi\n●  Tahan tombol: tampilkan lagi jendela terakhir\n●  Seret tombol ke 🗑 untuk mematikan", 13.5f, 0xFFC5CFDB.toInt()).apply {
+        val how = tv("1.  Pilih aplikasi di menu Aplikasi di Tombol\n2.  Nyalakan tombol hijau, jadi merah saat aktif\n3.  Tap tombol bulat untuk membuka daftar\n4.  Tahan tombol: tampilkan lagi jendela terakhir\n5.  Seret tombol ke ikon tempat sampah untuk mematikan", 13.5f, 0xFFC5CFDB.toInt()).apply {
             setLineSpacing(dp(6).toFloat(), 1f); setPadding(dp(18), dp(16), dp(18), dp(16)); background = box(CARD, 20)
         }
         root.addView(how, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(10) })
@@ -180,7 +194,8 @@ class MainActivity : Activity() {
         val r = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(dp(18), dp(16), dp(18), dp(16)); setOnClickListener { onClick() }; press() }
         r.addView(tv(label, 14.5f, bold = true), LinearLayout.LayoutParams(0, -2, 1f))
         val pill = tv("", 12f).apply { setPadding(dp(12), dp(5), dp(12), dp(5)) }
-        r.addView(pill); r.addView(tv("   ›", 18f, DIM))
+        r.addView(pill, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(10) })
+        r.addView(IconView(this, IconView.CHEVRON, DIM), LinearLayout.LayoutParams(dp(16), dp(16)))
         parent.addView(r); return pill
     }
 
@@ -191,27 +206,35 @@ class MainActivity : Activity() {
     }
 
     private fun toggle() {
-        if (FloatingService.running) { stopService(Intent(this, FloatingService::class.java)); arrowBtn.postDelayed({ refresh() }, 300); return }
+        if (FloatingService.running) {
+            prefs.edit().putBoolean("wanted", false).apply()
+            stopService(Intent(this, FloatingService::class.java))
+            toggleBtn.postDelayed({ refresh() }, 300); return
+        }
         if (!hasOverlay()) {
             Toast.makeText(this, "Izinkan 'Tampilkan di atas aplikasi lain' dulu", Toast.LENGTH_LONG).show()
             startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))); return
         }
         if (!hasNotif()) requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
+        prefs.edit().putBoolean("wanted", true).apply()
         startForegroundService(Intent(this, FloatingService::class.java))
-        arrowBtn.postDelayed({ refresh() }, 300)
+        toggleBtn.postDelayed({ refresh() }, 300)
     }
 
     private fun refresh() {
         val on = FloatingService.running
-        statusMain.text = if (on) "Sedang aktif" else "Ketuk untuk mengaktifkan"
-        arrowBtn.text = if (on) "■" else "→"
-        arrowBtn.setTextColor(if (on) Color.WHITE else Color.BLACK)
-        arrowBtn.background = box(if (on) 0xFFFF5A5A.toInt() else Color.WHITE, 40, 0)
+        statusMain.text = if (on) "Aktif. Ketuk tombol merah untuk mematikan" else "Nonaktif. Ketuk tombol hijau untuk menyalakan"
+        val target = if (on) ON_COLOR else OFF_COLOR
+        val bg = toggleBtn.background as GradientDrawable
         if (lastOn != null && lastOn != on) {
-            arrowBtn.scaleX = 0.7f; arrowBtn.scaleY = 0.7f
-            arrowBtn.animate().scaleX(1f).scaleY(1f).setDuration(320).setInterpolator(OvershootInterpolator()).start()
-        }
-        lastOn = on
+            ValueAnimator.ofObject(ArgbEvaluator(), btnColor, target).apply {
+                duration = 350
+                addUpdateListener { bg.setColor(it.animatedValue as Int) }
+            }.start()
+        } else bg.setColor(target)
+        btnColor = target; lastOn = on
+        val n = prefs.getStringSet("pinned", emptySet())?.size ?: 0
+        pinnedSub.text = if (n == 0) "Belum dipilih, semua aplikasi akan tampil" else "$n aplikasi dipilih"
         setPill(permOverlay, hasOverlay()); setPill(permNotif, hasNotif()); setPill(permBattery, hasBattery())
     }
 
